@@ -147,6 +147,14 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
+from vllm.v1.events import (
+    AsyncOutputCopyFailed,
+    AsyncOutputCopyIssued,
+    AsyncOutputCreated,
+    AsyncOutputMaterialized,
+    AsyncOutputWaitComplete,
+    EventBus,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     ChunkedLocalAttentionSpec,
@@ -305,12 +313,34 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         self._num_nans = num_nans
         self._has_fault: torch.Tensor | None = None
 
+        if EventBus.worker_enabled:
+            EventBus.emit_worker(
+                AsyncOutputCreated(
+                    id(self),
+                    tuple(model_runner_output.req_ids),
+                    tuple(sampled_token_ids.shape),
+                    str(sampled_token_ids.dtype),
+                    "mrv1",
+                )
+            )
+
         # Initiate the copy on a separate stream, but do not synchronize it.
         default_stream = torch.cuda.current_stream()
         with torch.cuda.stream(async_output_copy_stream):
             async_output_copy_stream.wait_stream(default_stream)
-            self.sampled_token_ids_cpu = self._sampled_token_ids.to(
-                "cpu", non_blocking=True
+            copy_start_ns = time.perf_counter_ns() if EventBus.worker_enabled else 0
+            try:
+                self.sampled_token_ids_cpu = self._sampled_token_ids.to(
+                    "cpu", non_blocking=True
+                )
+            except Exception:
+                if EventBus.worker_enabled:
+                    EventBus.emit_worker(
+                        AsyncOutputCopyFailed(id(self), "sampled_token_d2h")
+                    )
+                raise
+            copy_dispatch_ns = (
+                time.perf_counter_ns() - copy_start_ns if copy_start_ns else 0
             )
             self._logprobs_tensors_cpu = (
                 self._logprobs_tensors.to_cpu_nonblocking()
@@ -326,6 +356,17 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
                 has_fault = get_ep_all2all_manager().query_fault()
                 self._has_fault = has_fault.to("cpu", non_blocking=True)
             self.async_copy_ready_event.record()
+        if copy_start_ns:
+            EventBus.emit_worker(
+                AsyncOutputCopyIssued(
+                    id(self),
+                    id(self.sampled_token_ids_cpu),
+                    id(self.async_copy_ready_event),
+                    self.sampled_token_ids_cpu.numel()
+                    * self.sampled_token_ids_cpu.element_size(),
+                    copy_dispatch_ns,
+                )
+            )
 
     def get_output(self) -> ModelRunnerOutput:
         """Copy the device tensors to the host and return a ModelRunnerOutput.
@@ -333,7 +374,17 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         This function blocks until the copy is finished.
         """
         max_gen_len = self.sampled_token_ids_cpu.shape[-1]
+        wait_start_ns = time.perf_counter_ns() if EventBus.worker_enabled else 0
         self.async_copy_ready_event.synchronize()
+        if EventBus.worker_enabled:
+            EventBus.emit_worker(
+                AsyncOutputWaitComplete(
+                    id(self), time.perf_counter_ns() - wait_start_ns
+                )
+            )
+        materialization_start_ns = (
+            time.perf_counter_ns() if EventBus.worker_enabled else 0
+        )
 
         # Release the device tensors once the copy has completed.
         del self._logprobs_tensors
@@ -373,6 +424,12 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
                 f"Mask: {mask.cpu().tolist()}"
             )
 
+        if EventBus.worker_enabled:
+            EventBus.emit_worker(
+                AsyncOutputMaterialized(
+                    id(self), time.perf_counter_ns() - materialization_start_ns
+                )
+            )
         return output
 
 
