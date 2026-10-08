@@ -160,7 +160,8 @@ def run_mrv2(events: ModuleType) -> SimpleNamespace:
 
 
 def test_scheduler_subscription_never_activates_worker_hot_paths(
-    events: ModuleType, monkeypatch: pytest.MonkeyPatch,
+    events: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     received: list[object] = []
     sink = SimpleNamespace(emit=received.append)
