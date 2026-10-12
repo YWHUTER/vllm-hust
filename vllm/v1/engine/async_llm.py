@@ -3,6 +3,7 @@
 import asyncio
 import os
 import socket
+import threading
 import time
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
@@ -206,6 +207,9 @@ class AsyncLLM(EngineClient):
 
         self._client_count = client_count
 
+        # The output task captures this event instead of self, avoiding a cycle.
+        # shutdown() can run in the API server's executor thread.
+        self._shutdown_requested = threading.Event()
         self.output_handler: asyncio.Task | None = None
         try:
             # Start output handler eagerly if we are in the asyncio eventloop.
@@ -295,6 +299,8 @@ class AsyncLLM(EngineClient):
 
     def shutdown(self, timeout: float | None = None) -> None:
         """Shutdown, cleaning up the background proc and IPC."""
+        if shutdown_requested := getattr(self, "_shutdown_requested", None):
+            shutdown_requested.set()
         shutdown_prometheus()
 
         if renderer := getattr(self, "renderer", None):
@@ -834,6 +840,7 @@ class AsyncLLM(EngineClient):
         # P0 multi-modal sender ("shadow") cache; None for text-only models.
         mm_processor_cache = renderer.mm_processor_cache
         chunk_size = envs.VLLM_V1_OUTPUT_PROC_CHUNK_SIZE
+        shutdown_requested = self._shutdown_requested
 
         async def output_handler():
             try:
@@ -895,6 +902,18 @@ class AsyncLLM(EngineClient):
                             iteration_stats=iteration_stats,
                             mm_cache_stats=renderer.stat_mm_cache(),
                         )
+            except EngineDeadError as e:
+                if (
+                    shutdown_requested.is_set()
+                    and not output_processor.has_unfinished_requests()
+                ):
+                    logger.info(
+                        "[shutdown] AsyncLLM output handler stopped after "
+                        "EngineCore exit"
+                    )
+                else:
+                    logger.exception("AsyncLLM output_handler failed.")
+                    output_processor.propagate_error(e)
             except Exception as e:
                 logger.exception("AsyncLLM output_handler failed.")
                 output_processor.propagate_error(e)
