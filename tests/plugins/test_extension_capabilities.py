@@ -22,7 +22,10 @@ from vllm.v1.core.sched.batch_admission import (
     BATCH_ADMISSION_POLICY_API_VERSION,
 )
 from vllm.v1.core.sched.preemption import PREEMPTION_POLICY_API_VERSION
-from vllm.v1.events import REQUEST_LIFECYCLE_EVENTS_API_VERSION
+from vllm.v1.events import (
+    ASYNC_OUTPUT_EVENTS_API_VERSION,
+    REQUEST_LIFECYCLE_EVENTS_API_VERSION,
+)
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -38,6 +41,7 @@ def test_extension_capability_snapshot_matches_owned_contracts() -> None:
             "vllm.batch-admission-policy": BATCH_ADMISSION_POLICY_API_VERSION,
             "vllm.request-processing-hook": REQUEST_PROCESSING_HOOK_API_VERSION,
             "vllm.request-lifecycle-events": (REQUEST_LIFECYCLE_EVENTS_API_VERSION),
+            "vllm.async-output-events": ASYNC_OUTPUT_EVENTS_API_VERSION,
             "vllm.kv-materialization-runtime-control": (
                 KV_MATERIALIZATION_RUNTIME_CONTROL_API_VERSION
             ),

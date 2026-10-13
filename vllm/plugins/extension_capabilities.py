@@ -21,7 +21,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.correlated_observab
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.observability import (
     KV_TRANSFER_OBSERVABILITY_API_VERSION,
 )
-from vllm.v1.events import REQUEST_LIFECYCLE_EVENTS_API_VERSION
+from vllm.v1.events import (
+    ASYNC_OUTPUT_EVENTS_API_VERSION,
+    REQUEST_LIFECYCLE_EVENTS_API_VERSION,
+)
 
 EXTENSION_CAPABILITIES_SCHEMA: Final = "vllm.extension-capabilities/v1"
 HOST_EXTENSION_API_VERSION: Final = "1.0"
@@ -39,6 +42,7 @@ _PROTOCOLS: Final = MappingProxyType(
         "vllm.batch-admission-policy": "1.1",
         "vllm.request-processing-hook": "1.0",
         "vllm.request-lifecycle-events": REQUEST_LIFECYCLE_EVENTS_API_VERSION,
+        "vllm.async-output-events": ASYNC_OUTPUT_EVENTS_API_VERSION,
         "vllm.kv-materialization-runtime-control": "1.0",
         "vllm.kv-transfer.observer": KV_TRANSFER_OBSERVABILITY_API_VERSION,
         "vllm.kv-transfer.observer.v2": (

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -10,6 +11,14 @@ import torch
 
 import vllm.envs as envs
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
+from vllm.v1.events import (
+    AsyncOutputCopyFailed,
+    AsyncOutputCopyIssued,
+    AsyncOutputCreated,
+    AsyncOutputMaterialized,
+    AsyncOutputWaitComplete,
+    EventBus,
+)
 from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
     LogprobsTensors,
@@ -133,11 +142,37 @@ class AsyncOutput(AsyncModelRunnerOutput):
         # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
         self.copy_event = torch.cuda.Event(blocking=True)
         self._has_fault: torch.Tensor | None = None
+        self._worker_events_active = EventBus.worker_enabled
+
+        if self._worker_events_active:
+            sampled = sampler_output.sampled_token_ids
+            EventBus.emit_worker(
+                AsyncOutputCreated(
+                    id(self),
+                    tuple(model_runner_output.req_ids),
+                    tuple(sampled.shape),
+                    str(sampled.dtype),
+                    "mrv2",
+                )
+            )
 
         with stream(copy_stream, main_stream):
             copy_stream.wait_stream(main_stream)
 
-            self.sampled_token_ids = async_copy_to_np(sampler_output.sampled_token_ids)
+            copy_start_ns = time.perf_counter_ns() if self._worker_events_active else 0
+            try:
+                self.sampled_token_ids = async_copy_to_np(
+                    sampler_output.sampled_token_ids
+                )
+            except Exception:
+                if self._worker_events_active:
+                    EventBus.emit_worker(
+                        AsyncOutputCopyFailed(id(self), "sampled_token_d2h")
+                    )
+                raise
+            copy_dispatch_ns = (
+                time.perf_counter_ns() - copy_start_ns if copy_start_ns else 0
+            )
             self.logprobs_tensors: LogprobsTensors | None = None
             if sampler_output.logprobs_tensors is not None:
                 self.logprobs_tensors = (
@@ -169,9 +204,29 @@ class AsyncOutput(AsyncModelRunnerOutput):
                 has_fault = get_ep_all2all_manager().query_fault()
                 self._has_fault = has_fault.to("cpu", non_blocking=True)
             self.copy_event.record(copy_stream)
+        if copy_start_ns:
+            EventBus.emit_worker(
+                AsyncOutputCopyIssued(
+                    id(self),
+                    id(self.sampled_token_ids),
+                    id(self.copy_event),
+                    self.sampled_token_ids.nbytes,
+                    copy_dispatch_ns,
+                )
+            )
 
     def get_output(self) -> ModelRunnerOutput:
+        wait_start_ns = time.perf_counter_ns() if self._worker_events_active else 0
         self.copy_event.synchronize()
+        if self._worker_events_active:
+            EventBus.emit_worker(
+                AsyncOutputWaitComplete(
+                    id(self), time.perf_counter_ns() - wait_start_ns
+                )
+            )
+        materialization_start_ns = (
+            time.perf_counter_ns() if self._worker_events_active else 0
+        )
 
         # NOTE(woosuk): The following code is to ensure compatibility with
         # the existing model runner.
@@ -214,6 +269,12 @@ class AsyncOutput(AsyncModelRunnerOutput):
                 f"Mask: {mask.cpu().tolist()}"
             )
 
+        if self._worker_events_active:
+            EventBus.emit_worker(
+                AsyncOutputMaterialized(
+                    id(self), time.perf_counter_ns() - materialization_start_ns
+                )
+            )
         return self.model_runner_output
 
 

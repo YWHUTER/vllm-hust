@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Default-off typed events for request lifecycle instrumentation.
+"""Default-off typed scheduler and worker lifecycle events.
 
 This module provides a process-local typed event outlet for the vLLM
 scheduler. It is intentionally generic: it exposes request-level lifecycle
@@ -52,6 +52,7 @@ from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
 REQUEST_LIFECYCLE_EVENTS_API_VERSION = "1.0"
+ASYNC_OUTPUT_EVENTS_API_VERSION = "1.0"
 
 
 @dataclass(frozen=True)
@@ -120,18 +121,81 @@ class RequestKvReclaimed(SchedulerEvent):
     path: Literal["immediate", "deferred"]
 
 
+@dataclass(frozen=True)
+class WorkerEvent:
+    """Base class for process-local asynchronous output events."""
+
+    ts_monotonic_ns: int = field(init=False, default_factory=time.monotonic_ns)
+
+
+@dataclass(frozen=True)
+class AsyncOutputCreated(WorkerEvent):
+    lifecycle_id: int
+    request_ids: tuple[str, ...]
+    shape: tuple[int, ...]
+    dtype: str
+    runner_kind: Literal["mrv1", "mrv2"] = "mrv1"
+
+
+@dataclass(frozen=True)
+class AsyncOutputCopyIssued(WorkerEvent):
+    lifecycle_id: int
+    storage_id: int
+    event_id: int
+    nbytes: int
+    dispatch_ns: int
+
+
+@dataclass(frozen=True)
+class AsyncOutputCopyFailed(WorkerEvent):
+    lifecycle_id: int
+    phase: str
+
+
+@dataclass(frozen=True)
+class AsyncOutputWaitComplete(WorkerEvent):
+    lifecycle_id: int
+    wait_ns: int
+
+
+@dataclass(frozen=True)
+class AsyncOutputMaterialized(WorkerEvent):
+    lifecycle_id: int
+    materialization_ns: int
+
+
+@dataclass(frozen=True)
+class AsyncOutputRetained(WorkerEvent):
+    storage_id: int
+
+
+@dataclass(frozen=True)
+class AsyncOutputConsumed(WorkerEvent):
+    storage_id: int
+    wait_ns: int
+    materialization_ns: int
+
+
 class EventSink(Protocol):
     """Consumer interface for scheduler events."""
 
     def emit(self, event: SchedulerEvent) -> None: ...
 
 
+class WorkerEventSink(Protocol):
+    """Consumer interface for asynchronous output events."""
+
+    def emit(self, event: WorkerEvent) -> None: ...
+
+
 class EventBus:
-    """Process-local typed event outlet that is disabled without sinks."""
+    """Process-local scheduler and worker outlets with independent activation."""
 
     _sinks: list[EventSink] = []
+    _worker_sinks: list[WorkerEventSink] = []
     _lock = threading.Lock()
     enabled = False
+    worker_enabled = False
 
     @classmethod
     def register_sink(cls, sink: EventSink) -> None:
@@ -163,8 +227,46 @@ class EventBus:
                 with contextlib.suppress(Exception):
                     cls.unregister_sink(sink)
 
+    @classmethod
+    def register_worker_sink(cls, sink: WorkerEventSink) -> None:
+        """Enable worker events for one sink without enabling scheduler events."""
+        with cls._lock:
+            if not any(existing is sink for existing in cls._worker_sinks):
+                cls._worker_sinks.append(sink)
+            cls.worker_enabled = bool(cls._worker_sinks)
+
+    @classmethod
+    def unregister_worker_sink(cls, sink: WorkerEventSink) -> None:
+        with cls._lock:
+            cls._worker_sinks = [
+                existing for existing in cls._worker_sinks if existing is not sink
+            ]
+            cls.worker_enabled = bool(cls._worker_sinks)
+
+    @classmethod
+    def emit_worker(cls, event: WorkerEvent) -> None:
+        """Deliver only to worker sinks; isolate failing consumers."""
+        if not cls.worker_enabled:
+            return
+        with cls._lock:
+            sinks = tuple(cls._worker_sinks)
+        for sink in sinks:
+            try:
+                sink.emit(event)
+            except Exception:
+                with contextlib.suppress(Exception):
+                    cls.unregister_worker_sink(sink)
+
 
 __all__ = [
+    "ASYNC_OUTPUT_EVENTS_API_VERSION",
+    "AsyncOutputConsumed",
+    "AsyncOutputCopyFailed",
+    "AsyncOutputCopyIssued",
+    "AsyncOutputCreated",
+    "AsyncOutputMaterialized",
+    "AsyncOutputRetained",
+    "AsyncOutputWaitComplete",
     "REQUEST_LIFECYCLE_EVENTS_API_VERSION",
     "EventBus",
     "EventSink",
@@ -172,4 +274,6 @@ __all__ = [
     "RequestKvReclaimed",
     "RequestPreempted",
     "SchedulerEvent",
+    "WorkerEvent",
+    "WorkerEventSink",
 ]
