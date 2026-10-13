@@ -181,6 +181,20 @@ def test_scheduler_subscription_never_activates_worker_hot_paths(
 
 
 @pytest.mark.parametrize("runner", [run_mrv1, run_mrv2])
+def test_late_subscription_does_not_emit_unmeasured_wait(
+    events: ModuleType, monkeypatch: pytest.MonkeyPatch, runner: Any
+) -> None:
+    received: list[object] = []
+
+    def subscribe_on_wait(self: FakeEvent) -> None:
+        events.EventBus.register_worker_sink(SimpleNamespace(emit=received.append))
+
+    monkeypatch.setattr(FakeEvent, "synchronize", subscribe_on_wait)
+    assert runner(events).sampled_token_ids == [[7]]
+    assert received == []
+
+
+@pytest.mark.parametrize("runner", [run_mrv1, run_mrv2])
 def test_worker_subscription_receives_only_its_runner_lifecycle(
     events: ModuleType, runner: Any
 ) -> None:
@@ -263,6 +277,26 @@ def test_second_consumer_receipt_follows_actual_input_batch_path(
         events.AsyncOutputRetained,
         events.AsyncOutputConsumed,
     ]
+
+
+def test_second_consumer_does_not_emit_without_retained_receipt(
+    events: ModuleType,
+) -> None:
+    namespace = {name: getattr(events, name) for name in events.__all__}
+    namespace.update(time=time, cast=cast)
+    method_namespace("vllm/v1/worker/gpu_input_batch.py", "InputBatch", namespace)
+    batch = object.__new__(namespace["InputBatch"])
+    batch.sampling_metadata = SimpleNamespace(output_token_ids=[[-1]])
+    batch.prev_req_id_to_index = {"r": 0}
+    batch._req_ids = ["r"]
+    batch.set_async_sampled_token_ids(FakeCpuTensor(), FakeEvent())
+
+    received: list[object] = []
+    events.EventBus.register_worker_sink(SimpleNamespace(emit=received.append))
+    batch.update_async_output_token_ids()
+
+    assert batch.sampling_metadata.output_token_ids == [[7]]
+    assert received == []
 
 
 def test_host_capability_names_the_worker_contract(events: ModuleType) -> None:

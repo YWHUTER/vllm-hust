@@ -142,8 +142,9 @@ class AsyncOutput(AsyncModelRunnerOutput):
         # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
         self.copy_event = torch.cuda.Event(blocking=True)
         self._has_fault: torch.Tensor | None = None
+        self._worker_events_active = EventBus.worker_enabled
 
-        if EventBus.worker_enabled:
+        if self._worker_events_active:
             sampled = sampler_output.sampled_token_ids
             EventBus.emit_worker(
                 AsyncOutputCreated(
@@ -158,13 +159,13 @@ class AsyncOutput(AsyncModelRunnerOutput):
         with stream(copy_stream, main_stream):
             copy_stream.wait_stream(main_stream)
 
-            copy_start_ns = time.perf_counter_ns() if EventBus.worker_enabled else 0
+            copy_start_ns = time.perf_counter_ns() if self._worker_events_active else 0
             try:
                 self.sampled_token_ids = async_copy_to_np(
                     sampler_output.sampled_token_ids
                 )
             except Exception:
-                if EventBus.worker_enabled:
+                if self._worker_events_active:
                     EventBus.emit_worker(
                         AsyncOutputCopyFailed(id(self), "sampled_token_d2h")
                     )
@@ -215,16 +216,16 @@ class AsyncOutput(AsyncModelRunnerOutput):
             )
 
     def get_output(self) -> ModelRunnerOutput:
-        wait_start_ns = time.perf_counter_ns() if EventBus.worker_enabled else 0
+        wait_start_ns = time.perf_counter_ns() if self._worker_events_active else 0
         self.copy_event.synchronize()
-        if EventBus.worker_enabled:
+        if self._worker_events_active:
             EventBus.emit_worker(
                 AsyncOutputWaitComplete(
                     id(self), time.perf_counter_ns() - wait_start_ns
                 )
             )
         materialization_start_ns = (
-            time.perf_counter_ns() if EventBus.worker_enabled else 0
+            time.perf_counter_ns() if self._worker_events_active else 0
         )
 
         # NOTE(woosuk): The following code is to ensure compatibility with
@@ -268,7 +269,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
                 f"Mask: {mask.cpu().tolist()}"
             )
 
-        if EventBus.worker_enabled:
+        if self._worker_events_active:
             EventBus.emit_worker(
                 AsyncOutputMaterialized(
                     id(self), time.perf_counter_ns() - materialization_start_ns

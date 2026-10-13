@@ -1035,11 +1035,13 @@ class InputBatch:
         if self.sampling_metadata.output_token_ids:
             self.sampled_token_ids_cpu = sampled_token_ids_cpu
             self.async_copy_ready_event = async_copy_ready_event
-            if EventBus.worker_enabled:
+            self._async_output_events_active = EventBus.worker_enabled
+            if self._async_output_events_active:
                 EventBus.emit_worker(AsyncOutputRetained(id(sampled_token_ids_cpu)))
         else:
             self.sampled_token_ids_cpu = None
             self.async_copy_ready_event = None
+            self._async_output_events_active = False
 
     def update_async_output_token_ids(self) -> None:
         """In async scheduling case, update output_token_ids in sampling metadata
@@ -1051,6 +1053,7 @@ class InputBatch:
             # Output token ids not needed or not async scheduling.
             return
 
+        record_worker_events = self._async_output_events_active
         assert self.prev_req_id_to_index is not None
         sampled_token_ids = None
         for index, req_id in enumerate(self.req_ids):
@@ -1064,18 +1067,18 @@ class InputBatch:
                 continue
             if sampled_token_ids is None:
                 assert self.async_copy_ready_event is not None
-                wait_start_ns = time.perf_counter_ns() if EventBus.worker_enabled else 0
+                wait_start_ns = time.perf_counter_ns() if record_worker_events else 0
                 self.async_copy_ready_event.synchronize()
                 wait_ns = (
                     time.perf_counter_ns() - wait_start_ns
-                    if EventBus.worker_enabled
+                    if record_worker_events
                     else 0
                 )
                 materialization_start_ns = (
-                    time.perf_counter_ns() if EventBus.worker_enabled else 0
+                    time.perf_counter_ns() if record_worker_events else 0
                 )
                 sampled_token_ids = self.sampled_token_ids_cpu.tolist()
-                if EventBus.worker_enabled:
+                if record_worker_events:
                     EventBus.emit_worker(
                         AsyncOutputConsumed(
                             id(self.sampled_token_ids_cpu),

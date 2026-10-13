@@ -312,8 +312,9 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         self._logprobs_tensors = logprobs_tensors
         self._num_nans = num_nans
         self._has_fault: torch.Tensor | None = None
+        self._worker_events_active = EventBus.worker_enabled
 
-        if EventBus.worker_enabled:
+        if self._worker_events_active:
             EventBus.emit_worker(
                 AsyncOutputCreated(
                     id(self),
@@ -328,13 +329,13 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         default_stream = torch.cuda.current_stream()
         with torch.cuda.stream(async_output_copy_stream):
             async_output_copy_stream.wait_stream(default_stream)
-            copy_start_ns = time.perf_counter_ns() if EventBus.worker_enabled else 0
+            copy_start_ns = time.perf_counter_ns() if self._worker_events_active else 0
             try:
                 self.sampled_token_ids_cpu = self._sampled_token_ids.to(
                     "cpu", non_blocking=True
                 )
             except Exception:
-                if EventBus.worker_enabled:
+                if self._worker_events_active:
                     EventBus.emit_worker(
                         AsyncOutputCopyFailed(id(self), "sampled_token_d2h")
                     )
@@ -374,16 +375,16 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         This function blocks until the copy is finished.
         """
         max_gen_len = self.sampled_token_ids_cpu.shape[-1]
-        wait_start_ns = time.perf_counter_ns() if EventBus.worker_enabled else 0
+        wait_start_ns = time.perf_counter_ns() if self._worker_events_active else 0
         self.async_copy_ready_event.synchronize()
-        if EventBus.worker_enabled:
+        if self._worker_events_active:
             EventBus.emit_worker(
                 AsyncOutputWaitComplete(
                     id(self), time.perf_counter_ns() - wait_start_ns
                 )
             )
         materialization_start_ns = (
-            time.perf_counter_ns() if EventBus.worker_enabled else 0
+            time.perf_counter_ns() if self._worker_events_active else 0
         )
 
         # Release the device tensors once the copy has completed.
@@ -424,7 +425,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
                 f"Mask: {mask.cpu().tolist()}"
             )
 
-        if EventBus.worker_enabled:
+        if self._worker_events_active:
             EventBus.emit_worker(
                 AsyncOutputMaterialized(
                     id(self), time.perf_counter_ns() - materialization_start_ns
